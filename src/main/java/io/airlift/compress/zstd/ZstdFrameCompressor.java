@@ -58,50 +58,6 @@ class ZstdFrameCompressor
         return SIZE_OF_INT;
     }
 
-    /**
-     * Used for streaming mode where
-     * @param outputBase
-     * @param outputAddress
-     * @param outputLimit
-     * @param windowSize
-     * @return
-     */
-    static int writeFrameHeader(final Object outputBase, final long outputAddress,
-                                final long outputLimit, int windowSize, boolean enableChecksum) {
-        checkArgument(outputLimit - outputAddress >= MAX_FRAME_HEADER_SIZE, "Output buffer too small");
-
-        long output = outputAddress;
-
-        // For streaming mode
-        // - Frame_Content_Size_flag should be set to zero (unknown)
-        // - Single_Segment_flag should be set to zero because streaming is an unbounded multi-step procedure
-        int frameHeaderDescriptor = enableChecksum ? CHECKSUM_FLAG : 0;
-
-        UNSAFE.putByte(outputBase, output, (byte) frameHeaderDescriptor);
-        output++;
-
-        int base = Integer.highestOneBit(windowSize);
-
-        int exponent = 32 - Integer.numberOfLeadingZeros(base) - 1;
-        if (exponent < MIN_WINDOW_LOG) {
-            throw new IllegalArgumentException("Minimum window size is " + (1 << MIN_WINDOW_LOG));
-        }
-
-        int remainder = windowSize - base;
-        if (remainder % (base / 8) != 0) {
-            throw new IllegalArgumentException("Window size of magnitude 2^" + exponent + " must be multiple of " + (base / 8));
-        }
-
-        // mantissa is guaranteed to be between 0-7
-        int mantissa = remainder / (base / 8);
-        int encoded = ((exponent - MIN_WINDOW_LOG) << 3) | mantissa;
-
-        UNSAFE.putByte(outputBase, output, (byte) encoded);
-        output++;
-
-        return (int) (output - outputAddress);
-    }
-
     // visible for testing
     static int writeFrameHeader(final Object outputBase, final long outputAddress, final long outputLimit, int inputSize, int windowSize)
     {
