@@ -279,7 +279,7 @@ class CompressionParameters
         return new CompressionParameters(windowLog, chainLog, hashLog, searchLog, searchLength, targetLength, strategy);
     }
 
-    private static CompressionParameters getDefaultParameters(int compressionLevel, long estimatedInputSize)
+    public static CompressionParameters getDefaultParameters(int compressionLevel, long estimatedInputSize)
     {
         int table = 0;
 

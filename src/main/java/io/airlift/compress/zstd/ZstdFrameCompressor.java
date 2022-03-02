@@ -30,14 +30,14 @@ import static io.airlift.compress.zstd.Huffman.MAX_SYMBOL;
 import static io.airlift.compress.zstd.Huffman.MAX_SYMBOL_COUNT;
 import static io.airlift.compress.zstd.UnsafeUtil.UNSAFE;
 import static io.airlift.compress.zstd.Util.checkArgument;
-import static io.airlift.compress.zstd.Util.put24BitLittleEndian;
+import static io.airlift.compress.zstd.UnsafeUtil.put24BitLittleEndian;
 import static sun.misc.Unsafe.ARRAY_BYTE_BASE_OFFSET;
 
 class ZstdFrameCompressor
 {
-    static final int MAX_FRAME_HEADER_SIZE = 14;
+    public static final int MAX_FRAME_HEADER_SIZE = 14;
 
-    private static final int CHECKSUM_FLAG = 0b100;
+    public static final int CHECKSUM_FLAG = 0b100;
     private static final int SINGLE_SEGMENT_FLAG = 0b100000;
 
     private static final int MINIMUM_LITERALS_SIZE = 63;
@@ -56,6 +56,50 @@ class ZstdFrameCompressor
 
         UNSAFE.putInt(outputBase, outputAddress, MAGIC_NUMBER);
         return SIZE_OF_INT;
+    }
+
+    /**
+     * Used for streaming mode where
+     * @param outputBase
+     * @param outputAddress
+     * @param outputLimit
+     * @param windowSize
+     * @return
+     */
+    static int writeFrameHeader(final Object outputBase, final long outputAddress,
+                                final long outputLimit, int windowSize, boolean enableChecksum) {
+        checkArgument(outputLimit - outputAddress >= MAX_FRAME_HEADER_SIZE, "Output buffer too small");
+
+        long output = outputAddress;
+
+        // For streaming mode
+        // - Frame_Content_Size_flag should be set to zero (unknown)
+        // - Single_Segment_flag should be set to zero because streaming is an unbounded multi-step procedure
+        int frameHeaderDescriptor = enableChecksum ? CHECKSUM_FLAG : 0;
+
+        UNSAFE.putByte(outputBase, output, (byte) frameHeaderDescriptor);
+        output++;
+
+        int base = Integer.highestOneBit(windowSize);
+
+        int exponent = 32 - Integer.numberOfLeadingZeros(base) - 1;
+        if (exponent < MIN_WINDOW_LOG) {
+            throw new IllegalArgumentException("Minimum window size is " + (1 << MIN_WINDOW_LOG));
+        }
+
+        int remainder = windowSize - base;
+        if (remainder % (base / 8) != 0) {
+            throw new IllegalArgumentException("Window size of magnitude 2^" + exponent + " must be multiple of " + (base / 8));
+        }
+
+        // mantissa is guaranteed to be between 0-7
+        int mantissa = remainder / (base / 8);
+        int encoded = ((exponent - MIN_WINDOW_LOG) << 3) | mantissa;
+
+        UNSAFE.putByte(outputBase, output, (byte) encoded);
+        output++;
+
+        return (int) (output - outputAddress);
     }
 
     // visible for testing
@@ -136,7 +180,7 @@ class ZstdFrameCompressor
     {
         int inputSize = (int) (inputLimit - inputAddress);
 
-        CompressionParameters parameters = CompressionParameters.compute(compressionLevel, inputSize);
+        CompressionParameters parameters = CompressionParameters.compute(compressionLevel, 0);
 
         long output = outputAddress;
 
@@ -196,7 +240,8 @@ class ZstdFrameCompressor
         return (int) (output - outputAddress);
     }
 
-    private static int compressBlock(Object inputBase, long inputAddress, int inputSize, Object outputBase, long outputAddress, int outputSize, CompressionContext context, CompressionParameters parameters)
+    public static int compressBlock(Object inputBase, long inputAddress, int inputSize,
+                               Object outputBase, long outputAddress, int outputSize, CompressionContext context, CompressionParameters parameters)
     {
         if (inputSize < MIN_BLOCK_SIZE + SIZE_OF_BLOCK_HEADER + 1) {
             //  don't even attempt compression below a certain input size

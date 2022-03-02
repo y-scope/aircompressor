@@ -21,11 +21,13 @@ import java.nio.Buffer;
 import java.nio.ByteOrder;
 
 import static java.lang.String.format;
+import static sun.misc.Unsafe.ARRAY_BYTE_BASE_OFFSET;
 
 final class UnsafeUtil
 {
     public static final Unsafe UNSAFE;
     private static final long ADDRESS_OFFSET;
+    public static final ByteOrder NATIVE_BYTE_ORDER = ByteOrder.nativeOrder();
 
     private UnsafeUtil() {}
 
@@ -60,5 +62,35 @@ final class UnsafeUtil
         }
 
         return UNSAFE.getLong(buffer, ADDRESS_OFFSET);
+    }
+
+    public static long readLong(byte[] src, int srcOff) {
+        return UNSAFE.getLong(src, ARRAY_BYTE_BASE_OFFSET + srcOff);
+    }
+
+    public static long readLongLE(byte[] src, int srcOff) {
+        long i = readLong(src, srcOff);
+        if (NATIVE_BYTE_ORDER == ByteOrder.BIG_ENDIAN) {
+            i = Long.reverseBytes(i);
+        }
+        return i;
+    }
+
+    public static int readInt(byte[] src, int srcOff) {
+        return UNSAFE.getInt(src, ARRAY_BYTE_BASE_OFFSET + srcOff);
+    }
+
+    public static int readIntLE(byte[] src, int srcOff) {
+        int i = readInt(src, srcOff);
+        if (NATIVE_BYTE_ORDER == ByteOrder.BIG_ENDIAN) {
+            i = Integer.reverseBytes(i);
+        }
+        return i;
+    }
+
+    public static void put24BitLittleEndian(Object outputBase, long outputAddress, int value)
+    {
+        UNSAFE.putShort(outputBase, outputAddress, (short) value);
+        UNSAFE.putByte(outputBase, outputAddress + Short.BYTES, (byte) (value >>> Short.SIZE));
     }
 }
