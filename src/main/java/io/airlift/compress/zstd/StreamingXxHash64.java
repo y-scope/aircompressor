@@ -17,6 +17,8 @@ package io.airlift.compress.zstd;
 import java.io.Closeable;
 import java.io.IOException;
 
+import static io.airlift.compress.zstd.UnsafeUtil.*;
+
 // Adapted from https://github.com/lz4/lz4-java/tree/master/src/java/net/jpountz/xxhash
 public class StreamingXxHash64 implements Closeable {
   private static final long PRIME64_1 = 0x9E3779B185EBCA87L;
@@ -49,51 +51,42 @@ public class StreamingXxHash64 implements Closeable {
       long v2 = this.v2;
       long v3 = this.v3;
       long v4 = this.v4;
+
       h64 = Long.rotateLeft(v1, 1) + Long.rotateLeft(v2, 7) + Long.rotateLeft(v3, 12) + Long.rotateLeft(v4, 18);
-      v1 *= PRIME64_2;
-      v1 = Long.rotateLeft(v1, 31);
-      v1 *= PRIME64_1;
-      h64 ^= v1;
+
+      v1 *= PRIME64_2; v1 = Long.rotateLeft(v1, 31); v1 *= PRIME64_1; h64 ^= v1;
       h64 = h64 * PRIME64_1 + PRIME64_4;
-      v2 *= PRIME64_2;
-      v2 = Long.rotateLeft(v2, 31);
-      v2 *= PRIME64_1;
-      h64 ^= v2;
+
+      v2 *= PRIME64_2; v2 = Long.rotateLeft(v2, 31); v2 *= PRIME64_1; h64 ^= v2;
       h64 = h64 * PRIME64_1 + PRIME64_4;
-      v3 *= PRIME64_2;
-      v3 = Long.rotateLeft(v3, 31);
-      v3 *= PRIME64_1;
-      h64 ^= v3;
+
+      v3 *= PRIME64_2; v3 = Long.rotateLeft(v3, 31); v3 *= PRIME64_1; h64 ^= v3;
       h64 = h64 * PRIME64_1 + PRIME64_4;
-      v4 *= PRIME64_2;
-      v4 = Long.rotateLeft(v4, 31);
-      v4 *= PRIME64_1;
-      h64 ^= v4;
+
+      v4 *= PRIME64_2; v4 = Long.rotateLeft(v4, 31); v4 *= PRIME64_1; h64 ^= v4;
       h64 = h64 * PRIME64_1 + PRIME64_4;
     } else {
-      h64 = this.seed + PRIME64_5;
+      h64 = seed + PRIME64_5;
     }
 
-    h64 += this.totalLen;
+    h64 += totalLen;
 
-    int off;
-    for (off = 0; off <= this.memSize - 8; off += 8) {
-      long k1 = UnsafeUtil.readLongLE(this.memory, off);
-      k1 *= PRIME64_2;
-      k1 = Long.rotateLeft(k1, 31);
-      k1 *= PRIME64_1;
-      h64 ^= k1;
+    int off = 0;
+    while (off <= memSize - 8) {
+      long k1 = readLongLE(memory, off);
+      k1 *= PRIME64_2; k1 = Long.rotateLeft(k1, 31); k1 *= PRIME64_1; h64 ^= k1;
       h64 = Long.rotateLeft(h64, 27) * PRIME64_1 + PRIME64_4;
+      off += 8;
     }
 
-    if (off <= this.memSize - 4) {
-      h64 ^= ((long) UnsafeUtil.readIntLE(this.memory, off) & 4294967295L) * PRIME64_1;
+    if (off <= memSize - 4) {
+      h64 ^= ((long) readIntLE(memory, off) & 4294967295L) * PRIME64_1;
       h64 = Long.rotateLeft(h64, 23) * PRIME64_2 + PRIME64_3;
       off += 4;
     }
 
-    while (off < this.memSize) {
-      h64 ^= (long) (this.memory[off] & 255) * PRIME64_5;
+    while (off < memSize) {
+      h64 ^= (memory[off] & 0xFF) * PRIME64_5;
       h64 = Long.rotateLeft(h64, 11) * PRIME64_1;
       ++off;
     }
@@ -103,6 +96,7 @@ public class StreamingXxHash64 implements Closeable {
     h64 ^= h64 >>> 29;
     h64 *= PRIME64_3;
     h64 ^= h64 >>> 32;
+
     return h64;
   }
 
@@ -133,62 +127,77 @@ public class StreamingXxHash64 implements Closeable {
    * @param len the number of bytes to hash
    */
   public void update(byte[] buf, int off, int len) {
-    this.totalLen += len;
-    if (this.memSize + len < 32) {
-      System.arraycopy(buf, off, this.memory, this.memSize, len);
-      this.memSize += len;
-    } else {
-      int end = off + len;
-      if (this.memSize > 0) {
-        System.arraycopy(buf, off, this.memory, this.memSize, 32 - this.memSize);
-        this.v1 += UnsafeUtil.readLongLE(this.memory, 0) * PRIME64_2;
-        this.v1 = Long.rotateLeft(this.v1, 31);
-        this.v1 *= PRIME64_1;
-        this.v2 += UnsafeUtil.readLongLE(this.memory, 8) * PRIME64_2;
-        this.v2 = Long.rotateLeft(this.v2, 31);
-        this.v2 *= PRIME64_1;
-        this.v3 += UnsafeUtil.readLongLE(this.memory, 16) * PRIME64_2;
-        this.v3 = Long.rotateLeft(this.v3, 31);
-        this.v3 *= PRIME64_1;
-        this.v4 += UnsafeUtil.readLongLE(this.memory, 24) * PRIME64_2;
-        this.v4 = Long.rotateLeft(this.v4, 31);
-        this.v4 *= PRIME64_1;
-        off += 32 - this.memSize;
-        this.memSize = 0;
-      }
+    totalLen += len;
 
-      int limit = end - 32;
+    if (memSize + len < 32) { // fill in tmp buffer
+      System.arraycopy(buf, off, memory, memSize, len);
+      memSize += len;
+      return;
+    }
+
+    final int end = off + len;
+
+    if (memSize > 0) { // data left from previous update
+      System.arraycopy(buf, off, memory, memSize, 32 - memSize);
+
+      v1 += readLongLE(memory, 0) * PRIME64_2;
+      v1 = Long.rotateLeft(v1, 31);
+      v1 *= PRIME64_1;
+
+      v2 += readLongLE(memory, 8) * PRIME64_2;
+      v2 = Long.rotateLeft(v2, 31);
+      v2 *= PRIME64_1;
+
+      v3 += readLongLE(memory, 16) * PRIME64_2;
+      v3 = Long.rotateLeft(v3, 31);
+      v3 *= PRIME64_1;
+
+      v4 += readLongLE(memory, 24) * PRIME64_2;
+      v4 = Long.rotateLeft(v4, 31);
+      v4 *= PRIME64_1;
+
+      off += 32 - memSize;
+      memSize = 0;
+    }
+
+    {
+      final int limit = end - 32;
       long v1 = this.v1;
       long v2 = this.v2;
       long v3 = this.v3;
+      long v4 = this.v4;
 
-      long v4;
-      for (v4 = this.v4; off <= limit; off += 8) {
-        v1 += UnsafeUtil.readLongLE(buf, off) * PRIME64_2;
+      while (off <= limit) {
+        v1 += readLongLE(buf, off) * PRIME64_2;
         v1 = Long.rotateLeft(v1, 31);
         v1 *= PRIME64_1;
         off += 8;
-        v2 += UnsafeUtil.readLongLE(buf, off) * PRIME64_2;
+
+        v2 += readLongLE(buf, off) * PRIME64_2;
         v2 = Long.rotateLeft(v2, 31);
         v2 *= PRIME64_1;
         off += 8;
-        v3 += UnsafeUtil.readLongLE(buf, off) * PRIME64_2;
+
+        v3 += readLongLE(buf, off) * PRIME64_2;
         v3 = Long.rotateLeft(v3, 31);
         v3 *= PRIME64_1;
         off += 8;
-        v4 += UnsafeUtil.readLongLE(buf, off) * PRIME64_2;
+
+        v4 += readLongLE(buf, off) * PRIME64_2;
         v4 = Long.rotateLeft(v4, 31);
         v4 *= PRIME64_1;
+        off += 8;
       }
 
       this.v1 = v1;
       this.v2 = v2;
       this.v3 = v3;
       this.v4 = v4;
-      if (off < end) {
-        System.arraycopy(buf, off, this.memory, 0, end - off);
-        this.memSize = end - off;
-      }
+    }
+
+    if (off < end) {
+      System.arraycopy(buf, off, memory, 0, end - off);
+      memSize = end - off;
     }
   }
 
