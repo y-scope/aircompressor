@@ -180,7 +180,7 @@ class ZstdFrameCompressor
     {
         int inputSize = (int) (inputLimit - inputAddress);
 
-        CompressionParameters parameters = CompressionParameters.compute(compressionLevel, 0);
+        CompressionParameters parameters = CompressionParameters.compute(compressionLevel, inputSize);
 
         long output = outputAddress;
 
