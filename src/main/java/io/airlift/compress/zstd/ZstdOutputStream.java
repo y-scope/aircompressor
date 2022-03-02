@@ -236,12 +236,12 @@ public class ZstdOutputStream extends FilterOutputStream {
    */
   @Override
   public void write(byte[] b, int off, int len) throws IOException {
-    if (useChecksum) {
-      streamingXxHash64.update(b, off, len);
-    }
-
     if (frameClosed) {
       openFrame();
+    }
+
+    if (useChecksum) {
+      streamingXxHash64.update(b, off, len);
     }
 
     // Compress
@@ -366,6 +366,5 @@ public class ZstdOutputStream extends FilterOutputStream {
     flush();
 
     out.close();
-    streamingXxHash64.close();
   }
 }
