@@ -180,14 +180,6 @@ public class ZstdOutputStream extends FilterOutputStream {
     int inputSize = (int) (inputPos - inputBlockBeginPos);
     int compressedSize = compressBlock(inputBase, inputBlockBeginPos + ARRAY_BYTE_BASE_OFFSET,
             inputSize, outputBase, ARRAY_BYTE_BASE_OFFSET, outputBase.length, context, parameters);
-    inputBlockBeginPos = inputBlockEndPos;
-    inputBlockEndPos += blockSize;
-    // Handle wraparound
-    if (inputBlockEndPos > inputBase.length) {
-      inputBlockBeginPos = 0;
-      inputBlockEndPos = blockSize;
-    }
-    inputPos = inputBlockBeginPos;
 
     int blockHeader;
     int lastBlockFlag = lastBlock ? 1 : 0;
@@ -198,7 +190,7 @@ public class ZstdOutputStream extends FilterOutputStream {
       out.write(blockerHeaderBase);
 
       // Write raw block content directly from input buffer and reset position to the beginning
-      out.write(inputBase, (int) inputPos, inputSize);
+      out.write(inputBase, (int) inputBlockBeginPos, inputSize);
     } else {
       blockHeader = lastBlockFlag | (COMPRESSED_BLOCK << 1) | (compressedSize << 3);
       put24BitLittleEndian(blockerHeaderBase, ARRAY_BYTE_BASE_OFFSET, blockHeader);
@@ -207,6 +199,15 @@ public class ZstdOutputStream extends FilterOutputStream {
       // Write compressed block content and reset input buffer position to the beginning
       out.write(outputBase, 0, compressedSize);
     }
+
+    inputBlockBeginPos = inputBlockEndPos;
+    inputBlockEndPos += blockSize;
+    // Handle wraparound
+    if (inputBlockEndPos > inputBase.length) {
+      inputBlockBeginPos = 0;
+      inputBlockEndPos = blockSize;
+    }
+    inputPos = inputBlockBeginPos;
   }
 
   /**
