@@ -43,19 +43,22 @@ public class ZstdOutputStream extends FilterOutputStream {
   private boolean useChecksum = false;
   private boolean closeFrameOnFlush = false;
 
-  private int blockSize = 0;
 
   private CompressionParameters parameters;
   private CompressionContext context;
 
-  private byte[] inputBase;
+  // TODO Come up with less confusing names
   private long inputPos;
+  private byte[] inputBase;
+  private long inputBlockBeginPos;
+  private long inputBlockEndPos;
+  private int blockSize = MAX_BLOCK_SIZE;
 
   private byte[] outputBase;
 
   private byte[] blockerHeaderBase;
 
-  private static final int ZSTD_CONTENTSIZE_UNKNOWN = 0;
+  private static final int ZSTD_CONTENTSIZE_UNKNOWN = Integer.MAX_VALUE;
 
   private StreamingXxHash64 streamingXxHash64;
 
@@ -73,14 +76,16 @@ public class ZstdOutputStream extends FilterOutputStream {
   }
 
   private void initializeStream() {
-    parameters = CompressionParameters.getDefaultParameters(DEFAULT_COMPRESSION_LEVEL, 0);
+    parameters = CompressionParameters.compute(DEFAULT_COMPRESSION_LEVEL, blockSize);
 
-    // Allocate an input buffer the same size as the sliding window size
-    inputBase = new byte[MAX_BLOCK_SIZE];
+    // TODO These should really be set based on the values calculated in CompressionContext
+    inputBase = new byte[(1 << parameters.getWindowLog()) + blockSize];
     inputPos = 0;
+    inputBlockBeginPos = 0;
+    inputBlockEndPos = blockSize;
 
     ZstdCompressor ctx = new ZstdCompressor();
-    int maxLength = ctx.maxCompressedLength(MAX_BLOCK_SIZE);
+    int maxLength = ctx.maxCompressedLength(blockSize);
     outputBase = new byte[maxLength];   // 128KB
 
     blockerHeaderBase = new byte[SIZE_OF_BLOCK_HEADER];
@@ -136,15 +141,17 @@ public class ZstdOutputStream extends FilterOutputStream {
 
   private void openFrame() throws IOException {
     // Generate magic and frame header bytes into output buffer
-    long output = ARRAY_BYTE_BASE_OFFSET;
+    long outputAddress = ARRAY_BYTE_BASE_OFFSET;
     long outputLimit = outputBase.length + ARRAY_BYTE_BASE_OFFSET;
-    output += writeMagic(outputBase, output, outputLimit);
-    output += writeFrameHeader(outputBase, output, outputLimit, inputBase.length, useChecksum);
+    outputAddress += writeMagic(outputBase, outputAddress, outputLimit);
+    outputAddress += writeFrameHeader(outputBase, outputAddress, outputLimit,
+            1 << parameters.getWindowLog(), useChecksum);
 
     // Transfer buffer content to outputStream
-    out.write(outputBase, 0, (int) (output - ARRAY_BYTE_BASE_OFFSET));
+    out.write(outputBase, 0, (int) (outputAddress - ARRAY_BYTE_BASE_OFFSET));
 
-    context = new CompressionContext(parameters, inputPos + ARRAY_BYTE_BASE_OFFSET, MAX_BLOCK_SIZE);
+    context = new CompressionContext(parameters, inputPos + ARRAY_BYTE_BASE_OFFSET,
+            ZSTD_CONTENTSIZE_UNKNOWN);
 
     if (useChecksum) {
       streamingXxHash64.reset();
@@ -168,11 +175,19 @@ public class ZstdOutputStream extends FilterOutputStream {
     return this;
   }
 
-  public void compressBlockToOutputStream(byte[] inputBase, long inputPos, int inputSize,
-                                          boolean lastBlock) throws IOException {
+  private void compressBlockToOutputStream(boolean lastBlock) throws IOException {
     // Compress the entire input buffer as a block
-    int compressedSize = compressBlock(inputBase, inputPos + ARRAY_BYTE_BASE_OFFSET, inputSize,
-        outputBase, ARRAY_BYTE_BASE_OFFSET, MAX_BLOCK_SIZE, context, parameters);
+    int inputSize = (int) (inputPos - inputBlockBeginPos);
+    int compressedSize = compressBlock(inputBase, inputBlockBeginPos + ARRAY_BYTE_BASE_OFFSET,
+            inputSize, outputBase, ARRAY_BYTE_BASE_OFFSET, outputBase.length, context, parameters);
+    inputBlockBeginPos = inputBlockEndPos;
+    inputBlockEndPos += blockSize;
+    // Handle wraparound
+    if (inputBlockEndPos > inputBase.length) {
+      inputBlockBeginPos = 0;
+      inputBlockEndPos = blockSize;
+    }
+    inputPos = inputBlockBeginPos;
 
     int blockHeader;
     int lastBlockFlag = lastBlock ? 1 : 0;
@@ -219,15 +234,11 @@ public class ZstdOutputStream extends FilterOutputStream {
       openFrame();
     }
 
-    long inputRemaining = inputBase.length - inputPos;
-    if (inputRemaining == 0) {
-      // Input buffer is full, compress the entire input buffer as a block
-      compressBlockToOutputStream(inputBase, 0, inputBase.length, false);
-
-      // Reset input buffer to the beginning
-      inputPos = 0;
+    long numEmptyBytesInBlock = inputBlockEndPos - inputPos;
+    if (0 == numEmptyBytesInBlock) {
+      // Got a full block, so compress it
+      compressBlockToOutputStream(false);
     }
-
     UNSAFE.putByte(inputBase, inputPos + ARRAY_BYTE_BASE_OFFSET, (byte) b);
     ++inputPos;
   }
@@ -285,51 +296,19 @@ public class ZstdOutputStream extends FilterOutputStream {
       streamingXxHash64.update(b, off, len);
     }
 
-    // Compress
-    long inputRemaining = inputBase.length - inputPos;
-    if (inputRemaining == 0) {
-      // Input buffer is full, compress the entire input buffer as a block
-      compressBlockToOutputStream(inputBase, 0, inputBase.length, false);
-
-      // Reset input buffer to the beginning
-      inputPos = 0;
-    }
-
-    if (inputPos + len <= inputBase.length) {
-      // b[] is smaller than the input buffer's remaining capacity, append to the buffer
-      UNSAFE.copyMemory(b, ARRAY_BYTE_BASE_OFFSET, inputBase, inputPos + ARRAY_BYTE_BASE_OFFSET,
-          len);
-      inputPos += len;
-    } else {
-      // b[] is larger than input buffer's remaining capacity
-
-      // 1. Append some bytes from b to construct a full input buffer
-      // skip if input buffer is empty and inputLength is larger window
-      if (len < inputBase.length) {
-        int numBytesToCopy = (int) (inputBase.length - inputPos);
-        UNSAFE.copyMemory(b, off + ARRAY_BYTE_BASE_OFFSET, inputBase, inputPos + ARRAY_BYTE_BASE_OFFSET,
-            numBytesToCopy);
-        off += numBytesToCopy;
-
-        // At this point, we have a full input buffer and want to compress it
-        compressBlockToOutputStream(inputBase, 0, inputBase.length, false);
+    while (len > 0) {
+      long numEmptyBytesInBlock = inputBlockEndPos - inputPos;
+      if (0 == numEmptyBytesInBlock) {
+        // Got a full block, so compress it
+        compressBlockToOutputStream(false);
+      } else {
+        // Copy from b into inputBase
+        long numBytesToCopy = Math.min(numEmptyBytesInBlock, len);
+        UNSAFE.copyMemory(b, off + ARRAY_BYTE_BASE_OFFSET, inputBase,
+                inputPos + ARRAY_BYTE_BASE_OFFSET, numBytesToCopy);
+        inputPos += numBytesToCopy;
         len -= numBytesToCopy;
-
-        // Reset input buffer to the beginning
-        inputPos = 0;
-      }
-
-      // 2. Compress as much as possible from b[] directly
-      while (len > inputBase.length) {
-        compressBlockToOutputStream(b, off, inputBase.length, false);
-        off += inputBase.length;
-        len -= inputBase.length;
-      }
-
-      // 3. If there are left-over uncompressed bytes, copy them into the input buffer
-      if (len > 0) {
-        UNSAFE.copyMemory(b, off + ARRAY_BYTE_BASE_OFFSET, inputBase, inputPos + ARRAY_BYTE_BASE_OFFSET, len);
-        inputPos += len;
+        off += numBytesToCopy;
       }
     }
   }
@@ -358,15 +337,13 @@ public class ZstdOutputStream extends FilterOutputStream {
       // Close frame basically means the flushed block is the last block
       closeFrame();
     } else {
-      if (inputPos == 0) {
+      if (inputPos == inputBlockBeginPos) {
         return;
       }
       // Flush block, but don't close frame
-      compressBlockToOutputStream(inputBase, 0, (int) inputPos, false);
-      inputPos = 0;
+      compressBlockToOutputStream(false);
     }
 
-    // FLush the outputstream
     out.flush();
   }
 
@@ -377,8 +354,7 @@ public class ZstdOutputStream extends FilterOutputStream {
     }
 
     // Compress the data in the input buffer and flush it as last block
-    compressBlockToOutputStream(inputBase, 0, (int) inputPos, true);
-    inputPos = 0;
+    compressBlockToOutputStream(true);
 
     if (useChecksum) {
       // Flush the last 4 bytes of the checksum as little endian integer
